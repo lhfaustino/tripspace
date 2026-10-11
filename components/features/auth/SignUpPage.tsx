@@ -20,6 +20,7 @@ const USERNAME_AVAILABLE_TEXT = "Nome de Usu\u00e1rio dispon\u00edvel.";
 const USERNAME_TAKEN_TEXT = "Este nome de Usu\u00e1rio j\u00e1 existe.";
 const USERNAME_CHECK_ERROR_TEXT = "N\u00e3o foi poss\u00edvel verificar agora. Confirme a migration de username no Supabase.";
 const USERNAME_REQUIRED_TEXT = "Escolha um nome de Usu\u00e1rio dispon\u00edvel antes de continuar.";
+const EMAIL_ALREADY_REGISTERED_TEXT = "Este e-mail j\u00e1 est\u00e1 cadastrado. Use a p\u00e1gina Entrar para acessar sua conta.";
 const COMPANY_OPTIONS = ["LATAM", "GOL", "AZUL"] as const;
 const BASE_OPTIONS = ["SAO", "GIG", "FOR", "BSB", "POA"] as const;
 
@@ -130,32 +131,27 @@ export const SignUpPage = () => {
 
             if (signUpError) {
                 if (isAlreadyRegisteredError(signUpError)) {
-                    await signInExistingUser(supabase, formData.email, formData.password);
-                    addToast({
-                        title: "Conta encontrada",
-                        description: "Entramos com sua conta existente.",
-                        type: "success",
-                    });
-                    router.push(AUTH_CONFIG.afterSignupPath);
-                    router.refresh();
-                    return;
+                    throw new Error(EMAIL_ALREADY_REGISTERED_TEXT);
                 }
 
                 throw signUpError;
             }
 
             if (authData.user) {
-                if (!authData.session) {
-                    const { error: signInError } = await supabase.auth.signInWithPassword({
-                        email: formData.email,
-                        password: formData.password,
-                    });
+                // Supabase can return an obfuscated user for an existing address
+                // when email confirmation and account-enumeration protection are enabled.
+                if (authData.user.identities?.length === 0) {
+                    throw new Error(EMAIL_ALREADY_REGISTERED_TEXT);
+                }
 
-                    if (signInError) {
-                        throw new Error(
-                            "Cadastro criado, mas o Supabase ainda está exigindo confirmação por e-mail. Desative a confirmação de e-mail no Supabase Auth e tente entrar novamente."
-                        );
-                    }
+                if (!authData.session) {
+                    addToast({
+                        title: "Confirme seu e-mail",
+                        description: "Enviamos um link de confirmação para concluir o cadastro.",
+                        type: "success",
+                    });
+                    router.push("/auth");
+                    return;
                 }
 
                 addToast({
@@ -347,21 +343,6 @@ const normalizeUsername = (value: string) =>
 const isAlreadyRegisteredError = (error: { message?: string; code?: string }) => {
     const message = error.message?.toLowerCase() ?? "";
     return error.code === "user_already_exists" || message.includes("already registered") || message.includes("already exists");
-};
-
-const signInExistingUser = async (
-    supabase: ReturnType<typeof createClient>,
-    email: string,
-    password: string
-) => {
-    const { error: signInError } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-    });
-
-    if (signInError) {
-        throw new Error("Este e-mail já tem conta. Confirme a senha e tente entrar novamente.");
-    }
 };
 
 const getUsernameHelperText = (status: UsernameStatus) => {

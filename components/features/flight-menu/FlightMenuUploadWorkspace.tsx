@@ -9,7 +9,9 @@ import { Button } from '@/components/ui/Button';
 import { Checkbox } from '@/components/ui/Checkbox';
 import { Dialog, Modal, ModalOverlay } from '@/components/ui/Modal';
 import { useToast } from '@/components/ui/Toast';
-import { RefreshCw, Send } from 'lucide-react';
+import { buildGoogleCalendarEvent, GOOGLE_CALENDAR_SCOPE } from '@/lib/google-calendar';
+import { createClient } from '@/lib/supabase/client';
+import { CalendarPlus, RefreshCw, Send } from 'lucide-react';
 import {
   Table,
   TableBody,
@@ -50,6 +52,7 @@ export function FlightMenuUploadWorkspace({
   const [isUpdating, setIsUpdating] = useState(false);
   const [isRefreshingMealPlan, setIsRefreshingMealPlan] = useState(false);
   const [isSendingTelegram, setIsSendingTelegram] = useState(false);
+  const [isSavingCalendar, setIsSavingCalendar] = useState(false);
   const [latestMealPlanUpdatedAt, setLatestMealPlanUpdatedAt] = useState<string | null>(currentMealPlanUpdatedAt);
   const [lastAppliedMealPlanUpdatedAt, setLastAppliedMealPlanUpdatedAt] = useState<string | null>(userMealPlanRefreshedAt);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -65,6 +68,7 @@ export function FlightMenuUploadWorkspace({
   const areSomeVisibleRowsSelected = selectedVisibleRowCount > 0 && selectedVisibleRowCount < visibleRows.length;
   const mealPlanStorageKey = currentUserId ? `flight-menu:meal-plan-refresh:${currentUserId}` : null;
   const mealPlanToastStorageKey = currentUserId ? `flight-menu:meal-plan-toast:${currentUserId}` : null;
+  const calendarPendingStorageKey = currentUserId ? `flight-menu:calendar-pending:${currentUserId}` : null;
 
   useEffect(() => {
     setRows(initialRows);
@@ -110,7 +114,7 @@ export function FlightMenuUploadWorkspace({
       duration: 0,
       dedupeKey: `meal-plan-refresh:${currentUserId}:${latestMealPlanUpdatedAt}`,
     });
-  }, [addToast, latestMealPlanUpdatedAt, lastAppliedMealPlanUpdatedAt, mealPlanStorageKey, mealPlanToastStorageKey]);
+  }, [addToast, currentUserId, latestMealPlanUpdatedAt, lastAppliedMealPlanUpdatedAt, mealPlanStorageKey, mealPlanToastStorageKey]);
 
   useEffect(() => {
     const intervalId = window.setInterval(async () => {
@@ -122,6 +126,34 @@ export function FlightMenuUploadWorkspace({
 
     return () => window.clearInterval(intervalId);
   }, []);
+
+  useEffect(() => {
+    const searchParams = new URLSearchParams(window.location.search);
+    if (searchParams.get('calendarSync') !== '1' || !calendarPendingStorageKey) return;
+
+    const pendingSelection = window.sessionStorage.getItem(calendarPendingStorageKey);
+    searchParams.delete('calendarSync');
+    const nextUrl = `${window.location.pathname}${searchParams.size > 0 ? `?${searchParams.toString()}` : ''}`;
+    window.history.replaceState(null, '', nextUrl);
+
+    if (!pendingSelection) {
+      setMessage({ type: 'error', text: 'A seleção de voos expirou. Selecione os voos novamente.' });
+      return;
+    }
+
+    window.sessionStorage.removeItem(calendarPendingStorageKey);
+
+    try {
+      const rowIds = JSON.parse(pendingSelection);
+      if (!Array.isArray(rowIds) || rowIds.some((id) => typeof id !== 'string')) throw new Error('Invalid selection');
+      setSelectedRowIds(rowIds);
+      void saveFlightsToGoogleCalendar(rowIds, false);
+    } catch {
+      setMessage({ type: 'error', text: 'Não foi possível recuperar os voos selecionados.' });
+    }
+    // This should run once after returning from Google OAuth.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [calendarPendingStorageKey]);
 
   const handleUpdate = async () => {
     if (rosterFiles.length === 0) {
@@ -190,6 +222,124 @@ export function FlightMenuUploadWorkspace({
       });
     } finally {
       setIsSendingTelegram(false);
+    }
+  };
+
+  const handleSaveToGoogleCalendar = () => {
+    void saveFlightsToGoogleCalendar(selectedRowIds, true);
+  };
+
+  const saveFlightsToGoogleCalendar = async (rowIds: string[], allowAuthorization: boolean) => {
+    if (rowIds.length === 0) {
+      setMessage({ type: 'error', text: 'Selecione ao menos um voo para salvar no Google Agenda.' });
+      return;
+    }
+
+    if (!navigator.onLine) {
+      setMessage({
+        type: 'error',
+        text: 'Conecte-se à internet para salvar os voos. Depois da sincronização, eles ficam disponíveis no app Google Agenda.',
+      });
+      return;
+    }
+
+    setIsSavingCalendar(true);
+    setMessage(null);
+
+    try {
+      const supabase = createClient();
+      const { data, error } = await supabase.auth.getSession();
+      if (error) throw error;
+
+      const providerToken = data.session?.provider_token;
+      if (!providerToken) {
+        if (!allowAuthorization || !calendarPendingStorageKey) {
+          throw new Error('A autorização do Google Agenda não foi concluída. Tente novamente.');
+        }
+
+        window.sessionStorage.setItem(calendarPendingStorageKey, JSON.stringify(rowIds));
+        const { error: oauthError } = await supabase.auth.signInWithOAuth({
+          provider: 'google',
+          options: {
+            redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent('/roster-upload?calendarSync=1')}`,
+            scopes: GOOGLE_CALENDAR_SCOPE,
+            queryParams: { access_type: 'offline', prompt: 'consent' },
+          },
+        });
+        if (oauthError) throw oauthError;
+        return;
+      }
+
+      const selectedFlights = rows.filter((row) => rowIds.includes(row.id));
+      const invalidFlights: FlightMenuRow[] = [];
+      let savedCount = 0;
+      let existingCount = 0;
+
+      for (const flight of selectedFlights) {
+        const calendarEvent = await buildGoogleCalendarEvent(flight);
+        if (!calendarEvent) {
+          invalidFlights.push(flight);
+          continue;
+        }
+
+        const response = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${providerToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(calendarEvent),
+        });
+
+        if (response.status === 409) {
+          existingCount += 1;
+          continue;
+        }
+
+        if ((response.status === 401 || response.status === 403) && allowAuthorization && calendarPendingStorageKey) {
+          window.sessionStorage.setItem(calendarPendingStorageKey, JSON.stringify(rowIds));
+          const { error: oauthError } = await supabase.auth.signInWithOAuth({
+            provider: 'google',
+            options: {
+              redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent('/roster-upload?calendarSync=1')}`,
+              scopes: GOOGLE_CALENDAR_SCOPE,
+              queryParams: { access_type: 'offline', prompt: 'consent' },
+            },
+          });
+          if (oauthError) throw oauthError;
+          return;
+        }
+
+        if (!response.ok) {
+          const responseBody = await response.json().catch(() => null);
+          const reason = responseBody?.error?.message;
+          throw new Error(reason || `O Google Agenda recusou o voo ${flight.flightNumber}.`);
+        }
+
+        savedCount += 1;
+      }
+
+      if (selectedFlights.length === 0) {
+        throw new Error('Os voos selecionados não estão mais disponíveis. Atualize a página e tente novamente.');
+      }
+
+      const details = [
+        savedCount > 0 ? `${savedCount} novo${savedCount === 1 ? '' : 's'}` : '',
+        existingCount > 0 ? `${existingCount} já existente${existingCount === 1 ? '' : 's'}` : '',
+        invalidFlights.length > 0 ? `${invalidFlights.length} sem data ou horário válido` : '',
+      ].filter(Boolean);
+
+      setMessage({
+        type: invalidFlights.length === selectedFlights.length ? 'error' : 'success',
+        text: `Google Agenda atualizado: ${details.join(', ')}. Os eventos poderão ser consultados offline no aplicativo.`,
+      });
+    } catch (error) {
+      setMessage({
+        type: 'error',
+        text: error instanceof Error ? error.message : 'Não foi possível salvar os voos no Google Agenda.',
+      });
+    } finally {
+      setIsSavingCalendar(false);
     }
   };
 
@@ -284,6 +434,16 @@ export function FlightMenuUploadWorkspace({
           iconLeading={Send}
         >
           {isSendingTelegram ? 'Enviando...' : 'Enviar'}
+        </Button>
+        <Button
+          variant="secondary"
+          onPress={handleSaveToGoogleCalendar}
+          isDisabled={isSavingCalendar || selectedRowIds.length === 0}
+          className="w-full sm:w-auto"
+          size="lg"
+          iconLeading={CalendarPlus}
+        >
+          {isSavingCalendar ? 'Salvando...' : 'Google Agenda'}
         </Button>
         <Button
           onPress={() => {

@@ -29,10 +29,21 @@ http://localhost:3000
 - Replace old meal-plan records when a new meal plan is uploaded.
 - Refresh saved roster flights against the current meal plan only when the meal plan has changed.
 - Mark flights that are not found in the meal plan as `not found`.
+- Save selected flights directly to the user's primary Google Calendar.
 
 ## Environment
 
 The app uses Supabase for authentication, storage, and database records. Configure `.env.local` with the Supabase URL, anon key, service role key, and any webhook secrets used by the deployment.
+
+### Google Calendar
+
+The calendar action reuses the Google OAuth provider configured in Supabase. In the Google Cloud project used by that provider:
+
+1. Enable the Google Calendar API.
+2. Add `https://www.googleapis.com/auth/calendar.events` to the OAuth consent screen's data-access scopes.
+3. Keep the app's `/auth/callback` URL in the Supabase redirect allow list.
+
+Users grant calendar access only when they click **Google Agenda**. The app does not store Google access tokens in the database.
 
 ## Useful Commands
 

@@ -8,7 +8,6 @@ import type { RosterEntry } from '@/lib/pdf-parsing';
 import {
   MEAL_PLAN_NOT_FOUND,
   refreshUserFlightLegMealsFromCurrentMealPlan,
-  upsertByUniqueKey,
 } from '@/lib/flight-menu-processing';
 
 type CateringRuleRow = {
@@ -94,7 +93,7 @@ export async function uploadRoster(formData: FormData) {
     }
     
     const rosterKeys = rosterEntries.map((entry) =>
-      buildUniqueKey(entry.date || new Date().toISOString().split('T')[0], entry.flightNumber, entry.origin)
+      buildUniqueKey(entry.date || getTodayInSaoPaulo(), entry.flightNumber, entry.origin)
     );
     const cateringByKey = await fetchCateringByKey(rosterKeys);
 
@@ -116,14 +115,21 @@ export async function uploadRoster(formData: FormData) {
     }>();
 
     rosterEntries.forEach(entry => {
-      const flightDate = entry.date || new Date().toISOString().split('T')[0];
+      const flightDate = normalizeDate(entry.date || getTodayInSaoPaulo());
       const departureTime = new Date(`${flightDate}T${entry.departureTime}:00Z`);
       const arrivalTime = new Date(`${flightDate}T${entry.arrivalTime}:00Z`);
       const isActivity = entry.entryType === 'FR' || entry.entryType === 'FP';
+      const cateringKey = buildUniqueKey(flightDate, entry.flightNumber, entry.origin);
       const uniqueKey = isActivity
         ? `${flightDate}-${entry.flightNumber}-${entry.departureTime.replace(':', '')}`
-        : buildUniqueKey(flightDate, entry.flightNumber, entry.origin);
-      const catering = isActivity ? undefined : cateringByKey.get(uniqueKey);
+        : buildFlightLegUniqueKey(
+            flightDate,
+            entry.flightNumber,
+            entry.origin,
+            entry.destination,
+            entry.departureTime
+          );
+      const catering = isActivity ? undefined : cateringByKey.get(cateringKey);
       
       // Handle overnight flights
       if (arrivalTime < departureTime) {
@@ -149,9 +155,18 @@ export async function uploadRoster(formData: FormData) {
 
     const flightLegs = Array.from(flightLegsByKey.values());
 
-    const { inserted, updated, error: syncError } = flightLegs.length > 0
-      ? await upsertByUniqueKey(adminClient, 'flight_leg_details', flightLegs)
-      : { inserted: 0, updated: 0, error: null };
+    const cutoffDate = getTodayInSaoPaulo();
+    const replacementFlightLegs = flightLegs.filter(
+      (flightLeg) => flightLeg.departure_time.slice(0, 10) >= cutoffDate
+    );
+    const { data: replacementResult, error: syncError } = await adminClient.rpc(
+      'replace_user_future_flight_legs',
+      {
+        p_user_id: user.id,
+        p_cutoff_date: cutoffDate,
+        p_flight_legs: replacementFlightLegs.map(({ user_id: _userId, ...flightLeg }) => flightLeg),
+      }
+    );
 
     if (syncError) {
       return {
@@ -163,6 +178,9 @@ export async function uploadRoster(formData: FormData) {
       };
     }
 
+    const deletedCount = Number(replacementResult?.[0]?.deleted_count ?? 0);
+    const insertedCount = Number(replacementResult?.[0]?.inserted_count ?? flightLegs.length);
+
     const mealPlanUpdatedAt = await fetchCurrentUserMealPlanUpdatedAt(adminClient);
     if (mealPlanUpdatedAt) {
       await markUserMealPlanRefreshed(adminClient, user.id, mealPlanUpdatedAt);
@@ -170,14 +188,15 @@ export async function uploadRoster(formData: FormData) {
 
     return {
       success: true,
-      flightsAdded: flightLegs.length,
+      flightsAdded: replacementFlightLegs.length,
       flights: rosterEntries,
       rows: await fetchFlightMenuRows(supabase, user.id),
       mealPlanUpdatedAt,
       message:
         `Escala importada. ${files.length} arquivo${files.length === 1 ? '' : 's'} processado${files.length === 1 ? '' : 's'}, ` +
-        `${inserted} voo${inserted === 1 ? '' : 's'} novo${inserted === 1 ? '' : 's'} salvo${inserted === 1 ? '' : 's'} e ` +
-        `${updated} voo${updated === 1 ? '' : 's'} existente${updated === 1 ? '' : 's'} atualizado${updated === 1 ? '' : 's'}.${formatWarnings(warnings)}`,
+        `${deletedCount} voo${deletedCount === 1 ? '' : 's'} de hoje em diante removido${deletedCount === 1 ? '' : 's'} e ` +
+        `${insertedCount} voo${insertedCount === 1 ? '' : 's'} da nova escala salvo${insertedCount === 1 ? '' : 's'}. ` +
+        `Voos anteriores a ${formatIsoDate(cutoffDate)} foram preservados.${formatWarnings(warnings)}`,
     };
   } catch (error) {
     return {
@@ -284,6 +303,18 @@ function buildUniqueKey(date: string, flightNumber: string, origin: string) {
   return `${normalizeDate(date)}-${normalizeFlightNumber(flightNumber)}-${origin.toUpperCase()}`;
 }
 
+function buildFlightLegUniqueKey(
+  date: string,
+  flightNumber: string,
+  origin: string,
+  destination: string,
+  departureTime: string
+) {
+  const flightIdentity = flightNumber.trim().toUpperCase().replace(/\s+/g, '');
+  const routeIdentity = `${origin.trim().toUpperCase()}-${destination.trim().toUpperCase()}`;
+  return `${normalizeDate(date)}-${flightIdentity}-${routeIdentity}-${departureTime.replace(':', '')}`;
+}
+
 function normalizeDate(value: string) {
   const match = value.match(/^(\d{2})-(\d{2})-(\d{4})$/);
   if (match) return `${match[3]}-${match[2]}-${match[1]}`;
@@ -293,6 +324,20 @@ function normalizeDate(value: string) {
 function normalizeFlightNumber(value: string) {
   const digits = value.replace(/\D/g, '');
   return digits.startsWith('3') && digits.length === 5 ? digits.slice(1) : digits;
+}
+
+function getTodayInSaoPaulo() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Sao_Paulo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+}
+
+function formatIsoDate(value: string) {
+  const [year, month, day] = value.split('-');
+  return `${day}/${month}/${year}`;
 }
 
 function getRosterFiles(formData: FormData) {
