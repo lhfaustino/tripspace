@@ -25,3 +25,7 @@ tsconfig.tsbuildinfo
 *.sw?
 .agent
 .next
+
+# Local reverse-engineering and protocol-capture artifacts
+*.apks
+.iadp-analysis/

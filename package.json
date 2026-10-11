@@ -12,6 +12,12 @@
     "start": "next start -H 0.0.0.0",
     "lint": "next lint",
     "theme": "node scripts/update-theme.mjs",
+    "iadp:inspect-har": "node scripts/sanitize-iadp-har.mjs",
+    "iadp:anonymize-events": "node scripts/anonymize-iadp-events-har.mjs",
+    "iadp:compare-snapshots": "tsc lib/iadp/normalize-roster-events.ts --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir .iadp-analysis/iadp-runtime --rootDir . --strict --skipLibCheck --types node && node scripts/compare-iadp-snapshots.mjs",
+    "iadp:preview": "tsc lib/iadp/normalize-roster-events.ts --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir .iadp-analysis/iadp-runtime --rootDir . --strict --skipLibCheck --types node && node scripts/preview-iadp-import.mjs",
+    "iadp:validate-fixture": "tsc lib/iadp/normalize-roster-events.ts --target ES2022 --module NodeNext --moduleResolution NodeNext --outDir .iadp-analysis/iadp-runtime --rootDir . --strict --skipLibCheck --types node && node scripts/validate-iadp-fixture.mjs",
+    "test:iadp": "node scripts/prepare-iadp-test-runtime.mjs && tsc lib/iadp/normalize-roster-events.ts lib/iadp/manual-import.ts lib/iadp/__fixtures__/synthetic-roster.ts lib/iadp/normalize-roster-events.test.ts lib/iadp/manual-import.test.ts --target ES2022 --module CommonJS --moduleResolution Node --outDir .iadp-analysis/iadp-tests --rootDir . --strict --skipLibCheck --types node --esModuleInterop && node --test .iadp-analysis/iadp-tests/lib/iadp/*.test.js",
     "mcp": "mcp-server-supabase"
   },
   "dependencies": {

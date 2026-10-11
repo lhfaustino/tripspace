@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { getCurrentMealPlanVersion, refreshCurrentUserMealPlan, uploadRoster } from '@/app/actions/roster-upload';
 import { sendTodayFlightInformation } from '@/app/actions/telegram';
 import { RosterUploadCard } from '@/components/features/roster/RosterUploadCard';
+import { IadpManualImportCard } from '@/components/features/roster/IadpManualImportCard';
 import { Button } from '@/components/ui/Button';
 import { Checkbox } from '@/components/ui/Checkbox';
 import { Dialog, Modal, ModalOverlay } from '@/components/ui/Modal';
@@ -37,6 +38,7 @@ interface FlightMenuUploadWorkspaceProps {
   userMealPlanRefreshedAt?: string | null;
   currentUserId?: string | null;
   initialRows?: FlightMenuRow[];
+  manualIadpImportEnabled?: boolean;
 }
 
 export function FlightMenuUploadWorkspace({
@@ -44,6 +46,7 @@ export function FlightMenuUploadWorkspace({
   userMealPlanRefreshedAt = null,
   currentUserId = null,
   initialRows = [],
+  manualIadpImportEnabled = false,
 }: FlightMenuUploadWorkspaceProps) {
   const router = useRouter();
   const { addToast } = useToast();
@@ -470,6 +473,15 @@ export function FlightMenuUploadWorkspace({
             <div className="max-h-[75vh] overflow-y-auto px-4 py-5 sm:px-6">
               <div className="grid grid-cols-1 gap-6">
                 <RosterUploadCard deferUpload onFilesSelected={setRosterFiles} />
+                {manualIadpImportEnabled && (
+                  <IadpManualImportCard
+                    onSaved={(text) => {
+                      setMessage({ type: 'success', text });
+                      setIsUploadOpen(false);
+                      router.refresh();
+                    }}
+                  />
+                )}
               </div>
 
               {message && (

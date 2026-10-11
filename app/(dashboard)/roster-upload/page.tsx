@@ -56,6 +56,7 @@ export default async function RosterUploadPage() {
           userMealPlanRefreshedAt={userMealPlanRefreshedAt}
           currentUserId={user?.id ?? null}
           initialRows={initialRows}
+          manualIadpImportEnabled={process.env.NODE_ENV !== 'production'}
         />
       </div>
     </div>
